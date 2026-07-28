@@ -118,6 +118,7 @@ pub async fn assess(
             assessment.wildcard_resource = true;
         }
         assessment.policy_notes.extend(merged.notes.iter().cloned());
+        assessment.policy_notes.extend(r.notes.iter().cloned());
         assessment.raw_policy_documents = r.raw_documents;
         got_from_iam = !r.policies.is_empty();
         if got_from_iam {
