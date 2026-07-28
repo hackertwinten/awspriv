@@ -4,10 +4,11 @@ use std::fmt::Display;
 
 pub fn short<E: Display>(e: &E) -> String {
     let s = format!("{}", e);
-    if s.len() > 200 {
-        format!("{}…", &s[..200])
-    } else {
-        s
+    // Truncate on a char boundary — byte-slicing `&s[..200]` panics if byte 200
+    // splits a multibyte UTF-8 sequence (e.g. non-ASCII resource names).
+    match s.char_indices().nth(200) {
+        Some((idx, _)) => format!("{}…", &s[..idx]),
+        None => s,
     }
 }
 
