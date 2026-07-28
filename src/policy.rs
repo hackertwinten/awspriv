@@ -125,7 +125,7 @@ pub fn parse(doc: &str) -> ParsedPolicy {
             // automatically admin — `Allow NotAction:["s3:*"] Resource:"<one arn>"`
             // is a routine scoping idiom. Only expand it into a broad grant when
             // the statement is unscoped (Resource: "*"); otherwise just note it,
-            // since we can't yet reason about the specific resource (see #004).
+            // since we can't yet reason about the specific resource (see #5).
             if is_allow {
                 if stmt_resource_wild {
                     // Effective allow ≈ (all catalog actions) minus the excluded
@@ -160,7 +160,7 @@ pub fn parse(doc: &str) -> ParsedPolicy {
                     );
                 }
             }
-            // Deny + NotAction is scope-sensitive and deferred to #004: note only.
+            // Deny + NotAction is scope-sensitive and deferred to #5: note only.
         }
 
         for action in &actions {
@@ -281,7 +281,7 @@ mod tests {
 
     #[test]
     fn allow_notaction_scoped_resource_is_not_admin() {
-        // The false-CRITICAL case from #007: excluding a service on a specific
+        // The false-CRITICAL case: excluding a service on a specific
         // resource is a scoping idiom, not admin.
         let doc = r#"{"Statement":[{
             "Effect":"Allow",

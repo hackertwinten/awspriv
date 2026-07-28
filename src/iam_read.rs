@@ -52,7 +52,7 @@ pub async fn try_read(iam: &IamClient, id: &Identity, counter: &Counter) -> Opti
 
     // 1) GetUser confirms basic IAM read on ourselves. Also surfaces a
     //    permissions boundary if one is attached — a boundary CAPS effective
-    //    permissions, so we note it (we do not yet intersect it; see #008).
+    //    permissions, so we note it (we do not yet intersect it; see #7).
     counter.inc("iam:GetUser");
     match iam.get_user().user_name(user).send().await {
         Ok(o) => {
@@ -116,9 +116,9 @@ pub async fn try_read(iam: &IamClient, id: &Identity, counter: &Counter) -> Opti
 
     // 4) Group-derived permissions. Users commonly get their real power from a
     //    group (the canonical `Admins` group holding AdministratorAccess), so a
-    //    read that stops at user-level policies mis-scores admins as MINIMAL
-    //    (#006). `ListGroupsForUser` is targeted and rides the normal get-user
-    //    flow. Degrades gracefully: a denial here still returns user results.
+    //    read that stops at user-level policies mis-scores admins as MINIMAL.
+    //    `ListGroupsForUser` is targeted and rides the normal get-user flow.
+    //    Degrades gracefully: a denial here still returns user results.
     counter.inc("iam:ListGroupsForUser");
     if let Ok(o) = iam.list_groups_for_user().user_name(user).send().await {
         out.confirmed_actions.push("iam:ListGroupsForUser");
