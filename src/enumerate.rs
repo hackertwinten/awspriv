@@ -101,23 +101,36 @@ pub async fn assess(
         for a in &r.confirmed_actions {
             assessment.confirmed_actions.insert((*a).to_string());
         }
+
+        // Build the identity-based grant, folding in an AdministratorAccess
+        // attachment (its admin `Action: "*"` may not have been parsed if the
+        // document fetch was denied).
+        let mut base = policy::merge(&r.policies);
         if r.has_admin_attachment {
-            assessment.admin = true;
+            base.admin = true;
         }
-        let merged = policy::merge(&r.policies);
-        for a in &merged.allowed {
+
+        // A permissions boundary caps effective permissions to the intersection
+        // of the identity policies and the boundary — so a user with
+        // AdministratorAccess but a read-only boundary is not admin (#7).
+        let effective = match &r.boundary {
+            Some(b) => policy::intersect(&base, b),
+            None => base,
+        };
+
+        for a in &effective.allowed {
             assessment.confirmed_actions.insert(a.clone());
         }
-        for w in &merged.allowed_wildcards {
+        for w in &effective.allowed_wildcards {
             assessment.allowed_wildcards.insert(w.clone());
         }
-        if merged.admin {
+        if effective.admin {
             assessment.admin = true;
         }
-        if merged.has_wildcard_resource {
+        if effective.has_wildcard_resource {
             assessment.wildcard_resource = true;
         }
-        assessment.policy_notes.extend(merged.notes.iter().cloned());
+        assessment.policy_notes.extend(effective.notes.iter().cloned());
         assessment.policy_notes.extend(r.notes.iter().cloned());
         assessment.raw_policy_documents = r.raw_documents;
         got_from_iam = !r.policies.is_empty();
