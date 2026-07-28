@@ -78,4 +78,4 @@ For authorized security assessment only — pentest engagements, key-exposure tr
 
 ## License
 
-MIT OR Apache-2.0.
+Copyright 2026 hackertwinten. Licensed under Apache-2.0. See [LICENSE](LICENSE).
