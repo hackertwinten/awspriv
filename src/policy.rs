@@ -102,7 +102,8 @@ pub fn parse(doc: &str) -> ParsedPolicy {
         let resources = collect_strings(st.resource.as_ref());
 
         // Resource flag — note it once.
-        if resources.iter().any(|r| r == "*") {
+        let stmt_resource_wild = resources.iter().any(|r| r == "*");
+        if stmt_resource_wild {
             wildcard_resource = true;
         }
 
@@ -120,11 +121,46 @@ pub fn parse(doc: &str) -> ParsedPolicy {
                 st.effect,
                 not_actions.join(", ")
             ));
-            // Allow + NotAction "X" ≈ full admin minus X. Treat as admin signal
-            // for scoring; the user gets a note.
+            // `Allow NotAction: [X]` grants "everything except X". It is NOT
+            // automatically admin — `Allow NotAction:["s3:*"] Resource:"<one arn>"`
+            // is a routine scoping idiom. Only expand it into a broad grant when
+            // the statement is unscoped (Resource: "*"); otherwise just note it,
+            // since we can't yet reason about the specific resource (see #004).
             if is_allow {
-                admin = true;
+                if stmt_resource_wild {
+                    // Effective allow ≈ (all catalog actions) minus the excluded
+                    // set. Deliberately does NOT set `admin` — this scores high
+                    // via the composite (breadth + risk sums) without forcing the
+                    // 100/CRITICAL admin trump reserved for literal `Action: "*"`.
+                    let excluded: BTreeSet<String> = not_actions
+                        .iter()
+                        .flat_map(|na| {
+                            if na.contains('*') {
+                                catalog::expand_glob(na)
+                                    .into_iter()
+                                    .map(|m| m.action.to_string())
+                                    .collect::<Vec<_>>()
+                            } else {
+                                vec![na.clone()]
+                            }
+                        })
+                        .collect();
+                    for m in catalog::expand_glob("*") {
+                        let a = m.action.to_string();
+                        if !excluded.contains(&a) {
+                            allow_set.insert(a);
+                        }
+                    }
+                    allow_wildcards.insert(format!("NotAction:[{}]", not_actions.join(",")));
+                } else {
+                    notes.push(
+                        "Allow+NotAction on a scoped resource — effective actions not \
+                         expanded (resource-specific; not treated as admin)"
+                            .into(),
+                    );
+                }
             }
+            // Deny + NotAction is scope-sensitive and deferred to #004: note only.
         }
 
         for action in &actions {
@@ -241,6 +277,48 @@ mod tests {
         let doc = r#"{"Statement":{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}}"#;
         let p = parse(doc);
         assert!(p.allowed.contains("s3:GetObject"));
+    }
+
+    #[test]
+    fn allow_notaction_scoped_resource_is_not_admin() {
+        // The false-CRITICAL case from #007: excluding a service on a specific
+        // resource is a scoping idiom, not admin.
+        let doc = r#"{"Statement":[{
+            "Effect":"Allow",
+            "NotAction":["s3:*"],
+            "Resource":"arn:aws:ec2:us-east-1:123456789012:instance/i-abc"
+        }]}"#;
+        let p = parse(doc);
+        assert!(!p.admin, "scoped Allow+NotAction must not be admin");
+        assert!(
+            p.allowed.is_empty(),
+            "resource-scoped NotAction should not expand into a broad allow set"
+        );
+    }
+
+    #[test]
+    fn allow_notaction_wildcard_resource_is_broad_but_not_admin() {
+        // Unscoped Allow+NotAction: broad (everything except the excluded set)
+        // but still not the literal-`*` admin trump.
+        let doc = r#"{"Statement":[{
+            "Effect":"Allow",
+            "NotAction":["s3:*"],
+            "Resource":"*"
+        }]}"#;
+        let p = parse(doc);
+        assert!(!p.admin, "Allow+NotAction on * is broad but not the admin trump");
+        // Excluded service is absent...
+        assert!(!p.allowed.contains("s3:GetObject"));
+        // ...while other catalog actions are present.
+        assert!(p.allowed.contains("iam:CreateAccessKey"));
+        assert!(p.has_wildcard_resource);
+    }
+
+    #[test]
+    fn literal_action_star_is_still_admin() {
+        let doc = r#"{"Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#;
+        let p = parse(doc);
+        assert!(p.admin);
     }
 
     #[test]
