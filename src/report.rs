@@ -9,6 +9,7 @@ use anyhow::Result;
 use colored::Colorize;
 use comfy_table::{presets::UTF8_BORDERS_ONLY, Cell, ContentArrangement, Table};
 
+use crate::enumerate::Confidence;
 use crate::score::{Scored, Tier};
 
 pub fn print_table(rows: &[Scored]) {
@@ -95,6 +96,20 @@ pub fn print_table(rows: &[Scored]) {
         }
         if !r.services_touched.is_empty() {
             println!("  services: {}", r.services_touched.join(", ").dimmed());
+        }
+        if !r.action_confidence.is_empty() {
+            let (mut observed, mut simulated, mut inferred) = (0, 0, 0);
+            for c in r.action_confidence.values() {
+                match c {
+                    Confidence::Observed => observed += 1,
+                    Confidence::Simulated => simulated += 1,
+                    Confidence::PolicyInferred => inferred += 1,
+                }
+            }
+            println!(
+                "  {} {observed} observed, {simulated} simulated, {inferred} policy-inferred",
+                "evidence:".dimmed(),
+            );
         }
         if !r.policy_notes.is_empty() {
             for n in &r.policy_notes {

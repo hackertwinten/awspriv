@@ -30,6 +30,7 @@ fn assess(label: &str, actions: &[&str], admin: bool) -> Assessment {
         mode: "Stealth".into(),
         identity: identity(),
         confirmed_actions: actions.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>(),
+        action_confidence: BTreeMap::new(),
         allowed_wildcards: BTreeSet::new(),
         admin,
         wildcard_resource: false,
