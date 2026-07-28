@@ -19,7 +19,7 @@
 use aws_sdk_iam::Client as IamClient;
 
 use crate::counter::Counter;
-use crate::error::is_access_denied;
+use crate::error::{self, ErrorClass};
 use crate::identity::Identity;
 use crate::policy::{self, ParsedPolicy};
 
@@ -70,8 +70,7 @@ pub async fn try_read(iam: &IamClient, id: &Identity, counter: &Counter) -> Opti
             }
         }
         Err(e) => {
-            let s = format!("{}", e);
-            if is_access_denied(&s) {
+            if error::classify(&e) == ErrorClass::AccessDenied {
                 tracing::debug!("iam:GetUser denied — abandoning IAM read");
                 return None;
             }
