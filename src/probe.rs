@@ -57,13 +57,20 @@ pub async fn run(
         let counter = Arc::clone(&counter);
 
         handles.push(tokio::spawn(async move {
+            // Acquire the permit BEFORE consulting the denied set. All probe
+            // tasks are spawned up front, so checking here (rather than at spawn
+            // time) is what lets a denial recorded by an earlier same-service
+            // call actually short-circuit later ones. Note: with concurrency > 1,
+            // up to `concurrency` same-service calls can still be in flight before
+            // the first denial lands — full collapse requires concurrency == 1.
+            let _permit = sem.acquire_owned().await.expect("semaphore closed");
+
             if fail_fast {
                 let g = denied.lock().await;
                 if g.contains(p.service) {
                     return Outcome::Skipped(());
                 }
             }
-            let _permit = sem.acquire_owned().await.expect("semaphore closed");
 
             if jitter_ms > 0 {
                 let delay = rand::thread_rng().gen_range(0..=jitter_ms);
