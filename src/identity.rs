@@ -1,5 +1,6 @@
 //! Identity discovery + shared `SdkConfig` construction.
 
+use aws_config::SdkConfig;
 use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_credential_types::Credentials;
 use aws_sdk_iam::Client as IamClient;
@@ -19,6 +20,10 @@ pub struct Identity {
     /// Username extracted from a `user/` ARN, or role-name from `assumed-role/`.
     pub principal_name: Option<String>,
     pub is_assumed_role: bool,
+    /// Why `sts:GetCallerIdentity` failed, if it did. Lets a consumer tell a
+    /// dead/invalid key (arn None + reason) apart from a valid but locked-down
+    /// one, instead of both collapsing to "no permissions".
+    pub sts_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -30,7 +35,10 @@ pub enum KeyKind {
     Unknown,
 }
 
-pub async fn whoami(creds: &Credentials, args: &Args, counter: &Counter) -> Identity {
+/// Run `sts:GetCallerIdentity` and return the derived identity together with
+/// the `SdkConfig` built for it, so the caller reuses one config per key
+/// instead of building a second identical one.
+pub async fn whoami(creds: &Credentials, args: &Args, counter: &Counter) -> (Identity, SdkConfig) {
     let kind = match creds.access_key_id().get(..4) {
         Some("AKIA") => KeyKind::LongTerm,
         Some("ASIA") => KeyKind::ShortTerm,
@@ -40,7 +48,7 @@ pub async fn whoami(creds: &Credentials, args: &Args, counter: &Counter) -> Iden
     let sts = StsClient::new(&cfg);
 
     counter.inc("sts:GetCallerIdentity");
-    match sts.get_caller_identity().send().await {
+    let id = match sts.get_caller_identity().send().await {
         Ok(o) => {
             let (principal, is_role) = parse_principal(o.arn.as_deref());
             Identity {
@@ -50,10 +58,12 @@ pub async fn whoami(creds: &Credentials, args: &Args, counter: &Counter) -> Iden
                 key_kind: kind,
                 principal_name: principal,
                 is_assumed_role: is_role,
+                sts_error: None,
             }
         }
         Err(e) => {
-            tracing::warn!("sts:GetCallerIdentity failed: {}", crate::error::short(&e));
+            let reason = crate::error::short(&e);
+            tracing::warn!("sts:GetCallerIdentity failed: {reason}");
             Identity {
                 account: None,
                 arn: None,
@@ -61,9 +71,11 @@ pub async fn whoami(creds: &Credentials, args: &Args, counter: &Counter) -> Iden
                 key_kind: kind,
                 principal_name: None,
                 is_assumed_role: false,
+                sts_error: Some(reason),
             }
         }
-    }
+    };
+    (id, cfg)
 }
 
 /// `arn:aws:iam::123:user/alice` → ("alice", false)

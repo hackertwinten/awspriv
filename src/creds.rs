@@ -75,10 +75,32 @@ fn parse_file(path: &str) -> Result<Vec<KeySet>> {
 }
 
 fn redact(s: &str) -> String {
-    let s = s.trim();
-    if s.len() <= 8 {
+    // Operate on chars, not bytes: `&s[..4]` / `&s[s.len()-4..]` panic when a
+    // multibyte UTF-8 sequence straddles the slice boundary (a unicode label).
+    let chars: Vec<char> = s.trim().chars().collect();
+    if chars.len() <= 8 {
         "***".to_string()
     } else {
-        format!("{}…{}", &s[..4], &s[s.len() - 4..])
+        let head: String = chars[..4].iter().collect();
+        let tail: String = chars[chars.len() - 4..].iter().collect();
+        format!("{head}…{tail}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact;
+
+    #[test]
+    fn redact_masks_short_and_truncates_long() {
+        assert_eq!(redact("short"), "***");
+        assert_eq!(redact("AKIAIOSFODNN7EXAMPLE"), "AKIA…MPLE");
+    }
+
+    #[test]
+    fn redact_does_not_panic_on_multibyte_label() {
+        // Would panic under byte slicing at a char boundary.
+        let out = redact("héllo-wörld-café-ключ");
+        assert!(out.contains('…'));
     }
 }

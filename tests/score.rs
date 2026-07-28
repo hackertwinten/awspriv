@@ -19,6 +19,7 @@ fn identity() -> Identity {
         key_kind: KeyKind::LongTerm,
         principal_name: Some("test".into()),
         is_assumed_role: false,
+        sts_error: None,
     }
 }
 
