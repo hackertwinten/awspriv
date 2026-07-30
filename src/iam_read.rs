@@ -35,6 +35,9 @@ pub struct IamReadResult {
     pub confirmed_actions: Vec<&'static str>,
     /// Advisory notes surfaced to the report (e.g. permissions boundary).
     pub notes: Vec<String>,
+    /// Parsed permissions boundary, if one is attached and readable. The caller
+    /// intersects it with the identity policies to get effective permissions.
+    pub boundary: Option<ParsedPolicy>,
 }
 
 pub async fn try_read(iam: &IamClient, id: &Identity, counter: &Counter) -> Option<IamReadResult> {
@@ -62,11 +65,14 @@ pub async fn try_read(iam: &IamClient, id: &Identity, counter: &Counter) -> Opti
                 .user()
                 .and_then(|u| u.permissions_boundary())
                 .and_then(|pb| pb.permissions_boundary_arn())
+                .map(str::to_string)
             {
                 out.notes.push(format!(
                     "permissions boundary attached ({arn}) — effective permissions \
-                     may be capped below what these policies grant (not evaluated)"
+                     capped to the intersection of policies and boundary"
                 ));
+                // Fetch + parse the boundary so the caller can intersect it.
+                out.boundary = fetch_boundary(iam, &arn, counter, &mut out).await;
             }
         }
         Err(e) => {
@@ -176,7 +182,39 @@ async fn read_group_policies(
     }
 }
 
-/// Resolve a managed-policy ARN to its default-version document and ingest it.
+/// Resolve a managed-policy ARN to its default-version document (GetPolicy +
+/// GetPolicyVersion), counting and confirming both calls.
+async fn resolve_managed_doc(
+    iam: &IamClient,
+    arn: &str,
+    counter: &Counter,
+    out: &mut IamReadResult,
+) -> Option<String> {
+    counter.inc("iam:GetPolicy");
+    let p = iam.get_policy().policy_arn(arn).send().await.ok()?;
+    out.confirmed_actions.push("iam:GetPolicy");
+
+    let default_ver = p
+        .policy()
+        .and_then(|pp| pp.default_version_id())
+        .map(|s| s.to_string())?;
+
+    counter.inc("iam:GetPolicyVersion");
+    let v = iam
+        .get_policy_version()
+        .policy_arn(arn)
+        .version_id(&default_ver)
+        .send()
+        .await
+        .ok()?;
+    out.confirmed_actions.push("iam:GetPolicyVersion");
+
+    v.policy_version()
+        .and_then(|pv| pv.document())
+        .map(str::to_string)
+}
+
+/// Resolve a managed-policy ARN and ingest it into the identity policy set.
 /// Shared by user- and group-level attached policies. Flags AdministratorAccess.
 async fn fetch_managed_policy(
     iam: &IamClient,
@@ -187,36 +225,22 @@ async fn fetch_managed_policy(
     if arn.ends_with(":policy/AdministratorAccess") {
         out.has_admin_attachment = true;
     }
-
-    counter.inc("iam:GetPolicy");
-    let Ok(p) = iam.get_policy().policy_arn(arn).send().await else {
-        return;
-    };
-    out.confirmed_actions.push("iam:GetPolicy");
-
-    let Some(default_ver) = p
-        .policy()
-        .and_then(|pp| pp.default_version_id())
-        .map(|s| s.to_string())
-    else {
-        return;
-    };
-
-    counter.inc("iam:GetPolicyVersion");
-    let Ok(v) = iam
-        .get_policy_version()
-        .policy_arn(arn)
-        .version_id(&default_ver)
-        .send()
-        .await
-    else {
-        return;
-    };
-    out.confirmed_actions.push("iam:GetPolicyVersion");
-
-    if let Some(doc) = v.policy_version().and_then(|pv| pv.document()) {
-        ingest_doc(doc, out);
+    if let Some(doc) = resolve_managed_doc(iam, arn, counter, out).await {
+        ingest_doc(&doc, out);
     }
+}
+
+/// Resolve + parse a permissions-boundary policy. Unlike `fetch_managed_policy`
+/// this returns the parsed policy instead of merging it into the identity set —
+/// the caller intersects it (a boundary caps, it does not grant).
+async fn fetch_boundary(
+    iam: &IamClient,
+    arn: &str,
+    counter: &Counter,
+    out: &mut IamReadResult,
+) -> Option<ParsedPolicy> {
+    let doc = resolve_managed_doc(iam, arn, counter, out).await?;
+    Some(policy::parse(&doc))
 }
 
 /// Parse a (possibly URL-encoded) policy document and store both the parsed
