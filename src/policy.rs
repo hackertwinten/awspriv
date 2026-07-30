@@ -254,6 +254,51 @@ pub fn merge(policies: &[ParsedPolicy]) -> ParsedPolicy {
     out
 }
 
+/// Cap an identity-based grant by a permissions boundary.
+///
+/// Effective permissions are the **intersection** of the identity policies and
+/// the boundary: an action is allowed only if BOTH permit it. `admin` (the
+/// literal `Action: "*"`) survives only if both sides are admin.
+///
+/// Because our admin signal is a flag rather than an enumerated set, an admin
+/// side is treated as "allows everything", so the intersection collapses to the
+/// other side's allow set. Resource-wildcard status also intersects (unscoped
+/// only if both are).
+pub fn intersect(base: &ParsedPolicy, boundary: &ParsedPolicy) -> ParsedPolicy {
+    let admin = base.admin && boundary.admin;
+
+    let allowed: BTreeSet<String> = if boundary.admin {
+        base.allowed.clone()
+    } else if base.admin {
+        boundary.allowed.clone()
+    } else {
+        base.allowed.intersection(&boundary.allowed).cloned().collect()
+    };
+
+    let allowed_wildcards: BTreeSet<String> = if boundary.admin {
+        base.allowed_wildcards.clone()
+    } else if base.admin {
+        boundary.allowed_wildcards.clone()
+    } else {
+        base.allowed_wildcards
+            .intersection(&boundary.allowed_wildcards)
+            .cloned()
+            .collect()
+    };
+
+    let mut notes = base.notes.clone();
+    notes.push("effective permissions capped by a permissions boundary".into());
+    notes.extend(boundary.notes.iter().map(|n| format!("boundary: {n}")));
+
+    ParsedPolicy {
+        allowed,
+        allowed_wildcards,
+        admin,
+        has_wildcard_resource: base.has_wildcard_resource && boundary.has_wildcard_resource,
+        notes,
+    }
+}
+
 fn collect_strings(v: Option<&Value>) -> Vec<String> {
     match v {
         Some(Value::String(s)) => vec![s.clone()],
@@ -402,5 +447,57 @@ mod tests {
         let doc = "%7B%22Statement%22%3A%5B%7B%22Effect%22%3A%22Allow%22%2C%22Action%22%3A%22s3%3AGetObject%22%2C%22Resource%22%3A%22*%22%7D%5D%7D";
         let p = parse(doc);
         assert!(p.allowed.contains("s3:GetObject"));
+    }
+
+    fn allow(actions: &[&str], admin: bool) -> ParsedPolicy {
+        ParsedPolicy {
+            allowed: actions.iter().map(|s| s.to_string()).collect(),
+            admin,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn boundary_caps_admin_to_boundary_allow() {
+        // AdministratorAccess identity, read-only boundary -> not admin, only
+        // the boundary's actions survive (#7).
+        let base = allow(&[], true);
+        let boundary = allow(&["s3:GetObject", "s3:ListBucket"], false);
+        let eff = intersect(&base, &boundary);
+        assert!(!eff.admin, "boundary must strip admin");
+        assert_eq!(eff.allowed.len(), 2);
+        assert!(eff.allowed.contains("s3:GetObject"));
+    }
+
+    #[test]
+    fn admin_boundary_leaves_identity_untouched() {
+        let base = allow(&["iam:CreateAccessKey"], false);
+        let boundary = allow(&[], true);
+        let eff = intersect(&base, &boundary);
+        assert!(!eff.admin, "admin only if BOTH sides are admin");
+        assert!(eff.allowed.contains("iam:CreateAccessKey"));
+    }
+
+    #[test]
+    fn both_admin_stays_admin() {
+        let eff = intersect(&allow(&[], true), &allow(&[], true));
+        assert!(eff.admin);
+    }
+
+    #[test]
+    fn scoped_intersection_keeps_only_the_overlap() {
+        let base = allow(&["s3:GetObject", "kms:Decrypt"], false);
+        let boundary = allow(&["kms:Decrypt", "ec2:DescribeInstances"], false);
+        let eff = intersect(&base, &boundary);
+        assert_eq!(eff.allowed.iter().cloned().collect::<Vec<_>>(), vec!["kms:Decrypt"]);
+    }
+
+    #[test]
+    fn empty_boundary_denies_everything() {
+        let base = allow(&["s3:GetObject"], false);
+        let boundary = allow(&[], false);
+        let eff = intersect(&base, &boundary);
+        assert!(eff.allowed.is_empty());
+        assert!(!eff.admin);
     }
 }
