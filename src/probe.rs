@@ -20,7 +20,7 @@ use std::time::Duration;
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::counter::Counter;
-use crate::error::is_access_denied;
+use crate::error::ErrorClass;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Set {
@@ -80,17 +80,22 @@ pub async fn run(
             counter.inc(p.action);
             match (p.runner)().await {
                 Ok(()) => Outcome::Ok(p.action),
-                Err(msg) => {
-                    if is_access_denied(&msg) {
+                Err((class, msg)) => match class {
+                    ErrorClass::AccessDenied => {
                         if fail_fast {
                             let mut g = denied.lock().await;
                             g.insert(p.service);
                         }
                         Outcome::Denied(())
-                    } else {
-                        Outcome::Error(p.action, msg)
                     }
-                }
+                    // Throttling is not a denial: do NOT mark the service denied
+                    // (that would skip valid probes). Surface it so the operator
+                    // knows coverage was incomplete (#3).
+                    ErrorClass::Throttling => {
+                        Outcome::Error(p.action, format!("throttled: {}", msg))
+                    }
+                    ErrorClass::Other => Outcome::Error(p.action, msg),
+                },
             }
         }));
     }
@@ -114,12 +119,16 @@ enum Outcome {
     Error(&'static str, String),
 }
 
+/// A failed probe carries its classification alongside the display string, so
+/// the run loop branches on a typed `ErrorClass` rather than re-parsing text.
+type ProbeErr = (ErrorClass, String);
+
 // ---------------------------------------------------------------------------
 // Probe definitions
 // ---------------------------------------------------------------------------
 
 type RunnerFut =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'static>>;
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ProbeErr>> + Send + 'static>>;
 type RunnerFn = Box<dyn FnOnce() -> RunnerFut + Send + 'static>;
 
 struct Probe {
@@ -140,7 +149,7 @@ macro_rules! probe {
                         .send()
                         .await
                         .map(|_| ())
-                        .map_err(|e| format!("{}", e))
+                        .map_err(|e| (crate::error::classify(&e), format!("{}", e)))
                 })
             }),
         }
