@@ -106,9 +106,7 @@ pub async fn assess(
         // attachment (its admin `Action: "*"` may not have been parsed if the
         // document fetch was denied).
         let mut base = policy::merge(&r.policies);
-        if r.has_admin_attachment {
-            base.admin = true;
-        }
+        base.admin |= r.has_admin_attachment;
 
         // A permissions boundary caps effective permissions to the intersection
         // of the identity policies and the boundary — so a user with
@@ -124,12 +122,8 @@ pub async fn assess(
         for w in &effective.allowed_wildcards {
             assessment.allowed_wildcards.insert(w.clone());
         }
-        if effective.admin {
-            assessment.admin = true;
-        }
-        if effective.has_wildcard_resource {
-            assessment.wildcard_resource = true;
-        }
+        assessment.admin |= effective.admin;
+        assessment.wildcard_resource |= effective.has_wildcard_resource;
         assessment.policy_notes.extend(effective.notes.iter().cloned());
         assessment.policy_notes.extend(r.notes.iter().cloned());
         assessment.raw_policy_documents = r.raw_documents;
