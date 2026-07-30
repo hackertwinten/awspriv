@@ -14,11 +14,11 @@
 //! LOW ≥ 10, MINIMAL otherwise). Sort descending.
 
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::catalog::{self, RiskKind};
 use crate::counter::CounterSnapshot;
-use crate::enumerate::{Assessment, Source};
+use crate::enumerate::{Assessment, Confidence, Source};
 
 #[derive(Debug, Serialize)]
 pub struct Scored {
@@ -44,6 +44,9 @@ pub struct Scored {
     pub destructive_actions: Vec<String>,
     pub allowed_wildcards: Vec<String>,
     pub all_actions: Vec<String>,
+    /// How each confirmed action was established (policy-inferred / simulated /
+    /// observed). Lets a consumer weight the ranking by evidence quality.
+    pub action_confidence: BTreeMap<String, Confidence>,
 
     pub identity_reachable: bool,
     pub wildcard_resource: bool,
@@ -145,6 +148,7 @@ fn score_one(a: Assessment) -> Scored {
         destructive_actions: destructive,
         allowed_wildcards: a.allowed_wildcards.into_iter().collect(),
         all_actions: a.confirmed_actions.into_iter().collect(),
+        action_confidence: a.action_confidence,
         identity_reachable: a.identity.arn.is_some(),
         wildcard_resource: a.wildcard_resource,
         policy_notes: a.policy_notes,
