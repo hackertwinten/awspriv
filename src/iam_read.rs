@@ -267,12 +267,8 @@ fn ingest_doc(doc: &str, out: &mut IamReadResult) {
     let parsed = policy::parse(doc);
     // A customer-managed policy granting `Action: "*"` is admin regardless of
     // its name — surface it through the same flag as AdministratorAccess.
-    if parsed.admin {
-        out.has_admin_attachment = true;
-    }
-    let raw = urlencoding::decode(doc)
-        .map(|s| s.into_owned())
-        .unwrap_or_else(|_| doc.to_string());
+    out.has_admin_attachment |= parsed.admin;
+    let raw = urlencoding::decode(doc).map_or_else(|_| doc.to_string(), |s| s.into_owned());
     out.raw_documents.push(raw);
     out.policies.push(parsed);
 }

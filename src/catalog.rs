@@ -139,15 +139,14 @@ pub fn expand_glob(pattern: &str) -> Vec<&'static ActionMeta> {
     if pattern == "*" {
         return CATALOG.iter().collect();
     }
-    let (svc, act) = match pattern.split_once(':') {
-        Some((s, a)) => (s, a),
-        None => return Vec::new(),
+    let Some((svc, act)) = pattern.split_once(':') else {
+        return Vec::new();
     };
     CATALOG
         .iter()
         .filter(|m| m.service.eq_ignore_ascii_case(svc))
         .filter(|m| {
-            let action_part = m.action.split_once(':').map(|x| x.1).unwrap_or(m.action);
+            let action_part = m.action.split_once(':').map_or(m.action, |x| x.1);
             glob_match(act, action_part)
         })
         .collect()

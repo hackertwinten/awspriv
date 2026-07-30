@@ -108,9 +108,7 @@ pub fn parse(doc: &str) -> ParsedPolicy {
 
         // Resource flag — note it once.
         let stmt_resource_wild = resources.iter().any(|r| r == "*");
-        if stmt_resource_wild {
-            wildcard_resource = true;
-        }
+        wildcard_resource |= stmt_resource_wild;
 
         // Conditions are advisory at this level.
         let has_condition = st.condition.is_some();
@@ -243,12 +241,8 @@ pub fn merge(policies: &[ParsedPolicy]) -> ParsedPolicy {
         out.allowed.extend(p.allowed.iter().cloned());
         out.allowed_wildcards
             .extend(p.allowed_wildcards.iter().cloned());
-        if p.admin {
-            out.admin = true;
-        }
-        if p.has_wildcard_resource {
-            out.has_wildcard_resource = true;
-        }
+        out.admin |= p.admin;
+        out.has_wildcard_resource |= p.has_wildcard_resource;
         out.notes.extend(p.notes.iter().cloned());
     }
     out
