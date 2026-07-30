@@ -92,6 +92,11 @@ pub fn parse(doc: &str) -> ParsedPolicy {
     let mut allow_set: BTreeSet<String> = BTreeSet::new();
     let mut allow_wildcards: BTreeSet<String> = BTreeSet::new();
     let mut deny_set: BTreeSet<String> = BTreeSet::new();
+    // Denies that are resource-scoped or conditional. We can't match them
+    // against the (unscoped) allow set without resource evaluation, so rather
+    // than subtract them globally — which would under-report a broad Allow —
+    // we collect them for a note and leave the allow set intact.
+    let mut scoped_denies: BTreeSet<String> = BTreeSet::new();
     let mut admin = false;
     let mut wildcard_resource = false;
     let mut notes = Vec::new();
@@ -108,12 +113,19 @@ pub fn parse(doc: &str) -> ParsedPolicy {
         }
 
         // Conditions are advisory at this level.
-        if st.condition.is_some() {
+        let has_condition = st.condition.is_some();
+        if has_condition {
             notes.push("statement has Condition — actual access may be narrower".into());
         }
 
         let is_allow = st.effect.eq_ignore_ascii_case("Allow");
         let is_deny = st.effect.eq_ignore_ascii_case("Deny");
+
+        // A Deny only removes a permission everywhere when it is unconditional
+        // AND applies to every resource (`Resource: "*"`). A Deny scoped to one
+        // resource, or gated by a Condition, must NOT be subtracted from a
+        // broadly-allowed action — doing so under-reports the grant (#5).
+        let deny_is_global = is_deny && stmt_resource_wild && !has_condition;
 
         if !not_actions.is_empty() {
             notes.push(format!(
@@ -176,23 +188,43 @@ pub fn parse(doc: &str) -> ParsedPolicy {
                         allow_set.insert(m.action.to_string());
                     }
                 } else if is_deny {
+                    let sink = if deny_is_global {
+                        &mut deny_set
+                    } else {
+                        &mut scoped_denies
+                    };
                     for m in catalog::expand_glob(action) {
-                        deny_set.insert(m.action.to_string());
+                        sink.insert(m.action.to_string());
                     }
                 }
                 continue;
             }
             if is_allow {
                 allow_set.insert(action.clone());
-            } else if is_deny {
+            } else if deny_is_global {
                 deny_set.insert(action.clone());
+            } else if is_deny {
+                scoped_denies.insert(action.clone());
             }
         }
     }
 
-    // Apply Deny.
+    // Apply only the global (unconditional, resource-wildcard) Denies.
     for d in &deny_set {
         allow_set.remove(d);
+    }
+
+    // Resource-scoped / conditional Denies are reported but not subtracted, so
+    // the operator knows a narrower Deny exists without us under-reporting the
+    // Allow it partially overlaps.
+    let scoped_only: Vec<&String> = scoped_denies.difference(&deny_set).collect();
+    if !scoped_only.is_empty() {
+        let mut names: Vec<&str> = scoped_only.iter().map(|s| s.as_str()).collect();
+        names.sort_unstable();
+        notes.push(format!(
+            "scoped/conditional Deny not applied globally (review): {}",
+            names.join(", ")
+        ));
     }
 
     ParsedPolicy {
@@ -270,6 +302,50 @@ mod tests {
         let p = parse(doc);
         assert!(p.allowed.contains("iam:CreatePolicyVersion"));
         assert!(!p.allowed.contains("iam:DeleteUser"));
+    }
+
+    #[test]
+    fn resource_scoped_deny_is_not_subtracted() {
+        // A Deny scoped to one user must NOT remove the action from a
+        // Resource:"*" Allow — that would under-report the grant (#5).
+        let doc = r#"{"Statement":[
+            {"Effect":"Allow","Action":"iam:*","Resource":"*"},
+            {"Effect":"Deny","Action":"iam:CreateAccessKey","Resource":"arn:aws:iam::123:user/bob"}
+        ]}"#;
+        let p = parse(doc);
+        assert!(
+            p.allowed.contains("iam:CreateAccessKey"),
+            "scoped Deny should leave the broadly-allowed action in place"
+        );
+        assert!(
+            p.notes.iter().any(|n| n.contains("scoped/conditional Deny")),
+            "scoped Deny should be surfaced as a note"
+        );
+    }
+
+    #[test]
+    fn conditional_deny_is_not_subtracted() {
+        // A Deny gated by a Condition is not unconditional, so it must not be
+        // applied globally.
+        let doc = r#"{"Statement":[
+            {"Effect":"Allow","Action":"iam:*","Resource":"*"},
+            {"Effect":"Deny","Action":"iam:AttachUserPolicy","Resource":"*",
+             "Condition":{"BoolIfExists":{"aws:MultiFactorAuthPresent":"false"}}}
+        ]}"#;
+        let p = parse(doc);
+        assert!(p.allowed.contains("iam:AttachUserPolicy"));
+        assert!(p.notes.iter().any(|n| n.contains("scoped/conditional Deny")));
+    }
+
+    #[test]
+    fn unconditional_wildcard_deny_still_subtracts() {
+        // Regression guard: the global-Deny path is unchanged.
+        let doc = r#"{"Statement":[
+            {"Effect":"Allow","Action":"iam:*","Resource":"*"},
+            {"Effect":"Deny","Action":"iam:CreateAccessKey","Resource":"*"}
+        ]}"#;
+        let p = parse(doc);
+        assert!(!p.allowed.contains("iam:CreateAccessKey"));
     }
 
     #[test]
