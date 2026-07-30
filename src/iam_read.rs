@@ -222,9 +222,7 @@ async fn fetch_managed_policy(
     counter: &Counter,
     out: &mut IamReadResult,
 ) {
-    if arn.ends_with(":policy/AdministratorAccess") {
-        out.has_admin_attachment = true;
-    }
+    note_known_managed_policy(arn, out);
     if let Some(doc) = resolve_managed_doc(iam, arn, counter, out).await {
         ingest_doc(&doc, out);
     }
@@ -243,13 +241,69 @@ async fn fetch_boundary(
     Some(policy::parse(&doc))
 }
 
+/// Recognise well-known AWS-managed policies by ARN, even when the policy
+/// document itself can't be fetched (e.g. GetPolicyVersion is denied).
+///
+/// `AdministratorAccess` grants full `*:*` and flags admin. `PowerUserAccess`
+/// and `IAMFullAccess` are near-admin / privesc and are noted so the operator
+/// sees them regardless of doc-fetch outcome. Customer-managed admin-equivalent
+/// policies (`Action: "*"`) are caught later in `ingest_doc` once parsed.
+fn note_known_managed_policy(arn: &str, out: &mut IamReadResult) {
+    if arn.ends_with(":policy/AdministratorAccess") {
+        out.has_admin_attachment = true;
+    } else if arn.ends_with(":policy/PowerUserAccess") {
+        out.notes.push(
+            "PowerUserAccess attached — near-admin (all actions except IAM/Organizations)".into(),
+        );
+    } else if arn.ends_with(":policy/IAMFullAccess") {
+        out.notes
+            .push("IAMFullAccess attached — full IAM control (privilege-escalation risk)".into());
+    }
+}
+
 /// Parse a (possibly URL-encoded) policy document and store both the parsed
 /// result and the decoded raw JSON for the verbose report.
 fn ingest_doc(doc: &str, out: &mut IamReadResult) {
     let parsed = policy::parse(doc);
+    // A customer-managed policy granting `Action: "*"` is admin regardless of
+    // its name — surface it through the same flag as AdministratorAccess.
+    if parsed.admin {
+        out.has_admin_attachment = true;
+    }
     let raw = urlencoding::decode(doc)
         .map(|s| s.into_owned())
         .unwrap_or_else(|_| doc.to_string());
     out.raw_documents.push(raw);
     out.policies.push(parsed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognises_administrator_access_by_arn() {
+        let mut out = IamReadResult::default();
+        note_known_managed_policy("arn:aws:iam::aws:policy/AdministratorAccess", &mut out);
+        assert!(out.has_admin_attachment);
+    }
+
+    #[test]
+    fn notes_power_user_and_iam_full_without_flagging_admin() {
+        let mut out = IamReadResult::default();
+        note_known_managed_policy("arn:aws:iam::aws:policy/PowerUserAccess", &mut out);
+        note_known_managed_policy("arn:aws:iam::aws:policy/IAMFullAccess", &mut out);
+        assert!(!out.has_admin_attachment, "neither is full *:* admin");
+        assert_eq!(out.notes.len(), 2);
+    }
+
+    #[test]
+    fn customer_managed_star_policy_flags_admin_via_ingest() {
+        let mut out = IamReadResult::default();
+        ingest_doc(
+            r#"{"Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#,
+            &mut out,
+        );
+        assert!(out.has_admin_attachment, "Action:* is admin regardless of name");
+    }
 }

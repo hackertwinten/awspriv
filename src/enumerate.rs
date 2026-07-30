@@ -2,7 +2,7 @@
 //! selected mode, prefering quieter techniques and short-circuiting as
 //! soon as we have enough information.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -23,6 +23,10 @@ pub struct Assessment {
     pub identity: Identity,
     /// Set of confirmed actions (from policy parse, simulate, or probes).
     pub confirmed_actions: BTreeSet<String>,
+    /// How each confirmed action was established. Different sources carry very
+    /// different fidelity (a live call vs a parsed policy that an SCP or session
+    /// policy might still cap), so the strongest evidence per action is kept.
+    pub action_confidence: BTreeMap<String, Confidence>,
     /// Wildcard patterns from Allow statements (e.g. "iam:*").
     pub allowed_wildcards: BTreeSet<String>,
     /// Whether `*:*` or AdministratorAccess was observed.
@@ -35,6 +39,27 @@ pub struct Assessment {
     pub policy_notes: Vec<String>,
     pub probe_errors: Vec<String>,
     pub api_calls: CounterSnapshot,
+}
+
+/// Fidelity of a single confirmed action. `Ord` runs weakest → strongest, so
+/// `max` keeps the best evidence when an action is seen from several sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub enum Confidence {
+    /// Inferred from parsing a policy document. Real access may be narrower —
+    /// an SCP, permission boundary, or session policy can still cap it.
+    PolicyInferred,
+    /// Reported `allowed` by SimulatePrincipalPolicy (evaluated against
+    /// `Resource: "*"`, so resource-scoped denies are not reflected).
+    Simulated,
+    /// We actually performed the call and it succeeded — highest fidelity.
+    Observed,
+}
+
+/// Record an action's confidence, keeping the strongest seen so far.
+fn record(map: &mut BTreeMap<String, Confidence>, action: &str, c: Confidence) {
+    map.entry(action.to_string())
+        .and_modify(|e| *e = (*e).max(c))
+        .or_insert(c);
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -72,6 +97,7 @@ pub async fn assess(
         mode: format!("{:?}", args.mode),
         identity: id.clone(),
         confirmed_actions: BTreeSet::new(),
+        action_confidence: BTreeMap::new(),
         allowed_wildcards: BTreeSet::new(),
         admin: false,
         wildcard_resource: false,
@@ -84,6 +110,11 @@ pub async fn assess(
 
     if id.arn.is_some() {
         assessment.confirmed_actions.insert("sts:GetCallerIdentity".into());
+        record(
+            &mut assessment.action_confidence,
+            "sts:GetCallerIdentity",
+            Confidence::Observed,
+        );
     }
 
     if matches!(args.mode, Mode::Passive) {
@@ -100,7 +131,9 @@ pub async fn assess(
     let mut got_from_iam = false;
     if let Some(r) = iam_read {
         for a in &r.confirmed_actions {
+            // These IAM reads were actually performed, so they are observed.
             assessment.confirmed_actions.insert((*a).to_string());
+            record(&mut assessment.action_confidence, a, Confidence::Observed);
         }
 
         // Build the identity-based grant, folding in an AdministratorAccess
@@ -118,7 +151,9 @@ pub async fn assess(
         };
 
         for a in &effective.allowed {
+            // Parsed from a policy document — inferred, not observed.
             assessment.confirmed_actions.insert(a.clone());
+            record(&mut assessment.action_confidence, a, Confidence::PolicyInferred);
         }
         for w in &effective.allowed_wildcards {
             assessment.allowed_wildcards.insert(w.clone());
@@ -143,6 +178,7 @@ pub async fn assess(
             if let Some(sim) = simulate::run(&iam, arn, &actions, &counter).await {
                 for a in &sim.allowed {
                     assessment.confirmed_actions.insert(a.clone());
+                    record(&mut assessment.action_confidence, a, Confidence::Simulated);
                 }
                 if !sim.allowed.is_empty() {
                     assessment.source = Source::Simulate;
@@ -174,7 +210,9 @@ pub async fn assess(
         )
         .await;
         for a in outcome.confirmed {
+            // A probe is a live call that succeeded — observed.
             assessment.confirmed_actions.insert(a.to_string());
+            record(&mut assessment.action_confidence, a, Confidence::Observed);
         }
         assessment.probe_errors = outcome.unexpected_errors;
         assessment.source = match assessment.source {
@@ -186,4 +224,30 @@ pub async fn assess(
 
     assessment.api_calls = counter.snapshot();
     assessment
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_keeps_the_strongest_confidence() {
+        let mut m = BTreeMap::new();
+        // Weaker after stronger does not downgrade.
+        record(&mut m, "s3:GetObject", Confidence::Observed);
+        record(&mut m, "s3:GetObject", Confidence::PolicyInferred);
+        assert_eq!(m["s3:GetObject"], Confidence::Observed);
+
+        // Stronger after weaker upgrades.
+        record(&mut m, "kms:Decrypt", Confidence::PolicyInferred);
+        record(&mut m, "kms:Decrypt", Confidence::Simulated);
+        record(&mut m, "kms:Decrypt", Confidence::Observed);
+        assert_eq!(m["kms:Decrypt"], Confidence::Observed);
+    }
+
+    #[test]
+    fn confidence_orders_weakest_to_strongest() {
+        assert!(Confidence::PolicyInferred < Confidence::Simulated);
+        assert!(Confidence::Simulated < Confidence::Observed);
+    }
 }
