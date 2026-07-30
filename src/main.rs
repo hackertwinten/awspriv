@@ -4,19 +4,7 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-mod catalog;
-mod cli;
-mod counter;
-mod creds;
-mod enumerate;
-mod error;
-mod iam_read;
-mod identity;
-mod policy;
-mod probe;
-mod report;
-mod score;
-mod simulate;
+use awspriv::{cli, creds, enumerate, report, score};
 
 #[tokio::main]
 async fn main() -> Result<()> {
