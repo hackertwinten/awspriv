@@ -18,7 +18,7 @@ use aws_sdk_iam::Client as IamClient;
 use std::collections::BTreeSet;
 
 use crate::counter::Counter;
-use crate::error::is_access_denied;
+use crate::error::{self, ErrorClass};
 
 const BATCH_SIZE: usize = 50;
 
@@ -62,15 +62,28 @@ pub async fn run(
                     }
                 }
             }
-            Err(e) => {
-                let s = format!("{}", e);
-                if is_access_denied(&s) {
+            Err(e) => match error::classify(&e) {
+                // No permission to simulate at all — nothing to salvage.
+                ErrorClass::AccessDenied => {
                     tracing::debug!("iam:SimulatePrincipalPolicy denied — bailing out");
                     return None;
                 }
-                tracing::warn!("simulate failed: {}", crate::error::short(&e));
-                return None;
-            }
+                // Throttled or a transient error part-way through the batches:
+                // return what earlier chunks already confirmed rather than
+                // discarding it and reporting the key as having no access (#3).
+                class => {
+                    tracing::warn!(
+                        "simulate stopped early ({class:?}), returning {} partial result(s): {}",
+                        out.allowed.len(),
+                        crate::error::short(&e)
+                    );
+                    return if out.allowed.is_empty() {
+                        None
+                    } else {
+                        Some(out)
+                    };
+                }
+            },
         }
     }
 
