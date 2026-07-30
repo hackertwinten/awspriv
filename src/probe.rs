@@ -138,15 +138,24 @@ struct Probe {
 }
 
 macro_rules! probe {
-    ($action:expr, $service:expr, $client:expr, $call:ident) => {{
+    // Zero-arg form: a bare `client.call().send()`. Delegates to the
+    // customizer form with an identity closure.
+    ($action:expr, $service:expr, $client:expr, $call:ident) => {
+        probe!($action, $service, $client, $call, |b| b)
+    };
+    // Customizer form: `$customize` receives the fluent request builder and
+    // returns it, so a probe that needs parameters (e.g. `.max_items(1)`) can
+    // set them: `probe!("svc:Op", "svc", client, op, |b| b.max_items(1))`.
+    ($action:expr, $service:expr, $client:expr, $call:ident, $customize:expr) => {{
         let c = $client.clone();
         Probe {
             action: $action,
             service: $service,
             runner: Box::new(move || {
                 Box::pin(async move {
-                    c.$call()
-                        .send()
+                    #[allow(clippy::redundant_closure_call)]
+                    let req = ($customize)(c.$call());
+                    req.send()
                         .await
                         .map(|_| ())
                         .map_err(|e| (crate::error::classify(&e), format!("{}", e)))

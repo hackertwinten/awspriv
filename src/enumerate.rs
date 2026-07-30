@@ -63,8 +63,9 @@ pub async fn assess(
     // -----------------------------------------------------------------------
     // Phase 0 — STS:GetCallerIdentity (always)
     // -----------------------------------------------------------------------
-    let id = identity::whoami(&creds, args, &counter).await;
-    let cfg = identity::build_config(creds.clone(), &args.region, args.timeout).await;
+    // `whoami` builds the SdkConfig for this key; reuse it rather than building
+    // a second identical one.
+    let (id, cfg) = identity::whoami(&creds, args, &counter).await;
 
     let mut assessment = Assessment {
         label: label.clone(),
