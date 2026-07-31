@@ -5,3 +5,8 @@ Cargo.lock
 *.pem
 keys.txt
 graphify-out/
+
+# Local-only: agent config and internal working notes — never publish
+.claude/
+dev/
+CLAUDE.md
